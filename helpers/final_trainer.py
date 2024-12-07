@@ -93,7 +93,7 @@ async def train_model_for_user(user):
         supabase.table("samples")
         .select("*")
         .eq("user_id", user.id)
-        .eq("is_legitimate", True)
+        # .eq("is_legitimate", True)
         .execute()
     )
 
@@ -118,8 +118,6 @@ async def train_model_for_user(user):
     raw_imposter_data["negative_ud"] = raw_imposter_data["negative_ud%"] / 100
     raw_imposter_data["negative_uu"] = raw_imposter_data["negative_uu%"] / 100
     columns_to_transform = [
-        "negative_ud%",
-        "negative_uu%",
         "mean_hold_time1",
         "mean_hold_time2",
         "mean_f1",
@@ -208,7 +206,7 @@ async def train_model_for_user(user):
     print("Confusion Matrix:\n", confusion_matrix(y_test, y_pred, labels=[0, 1]))
     print("\nClassification Report:\n", classification_report(y_test, y_pred))
 
-    supabase.table("samples").insert(
+    supabase.table("histories").insert(
         {
             "user_id": user.id,
             "accuracy": accuracy_score(y_test, y_pred),
@@ -232,7 +230,19 @@ async def predict_user_samples(user, samples: List[dict]):
 
     # Make predictions
     y_pred = classifier.predict(processed_samples)
-    print(classifier.predict_proba(processed_samples))
+    predicted_proba = classifier.predict_proba(processed_samples)
+    print(f"Predicted for user {user.email}: {predicted_proba}")
+
+    # predicted_samples = [
+    #     {
+    #         "user_id": user.id,
+    #         "events": sample["events"],
+    #         "predicted_score": predicted_proba[index][1],
+    #         "security_level": user.user_metadata["security_level"],
+    #     }
+    #     for index, sample in enumerate(samples)
+    # ]
+    # supabase.table("samples").insert(predicted_samples).execute()
 
     # Return predictions as a list
     return y_pred.tolist()
