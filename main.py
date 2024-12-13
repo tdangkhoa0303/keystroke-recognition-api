@@ -1,13 +1,12 @@
 import logging
 
-from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from fastapi import HTTPException, Request
-from vendors.supabase import auth_admin_client, supabase
-from routers import user, sample
+from vendors.supabase import supabase
+from routers import samples, sessions, users
 
 app = FastAPI()
 
@@ -22,6 +21,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
 @app.middleware("http")
 async def required_authentication(request: Request, call_next):
     if request.method == "OPTIONS":
@@ -32,8 +33,24 @@ async def required_authentication(request: Request, call_next):
     if token:
         try:
             auth = supabase.auth.get_user(token)
+            session_metadata = (
+                supabase.table("session_metadata")
+                .select("*")
+                .eq("access_token", token)
+                .execute()
+            ).data
+
+            user_profile = (
+                supabase.table("profiles")
+                .select("*")
+                .eq("id", auth.user.id)
+                .single()
+                .execute()
+            ).data
+
+            request.state.session_metadata = session_metadata
+            request.state.user_profile = user_profile
             request.state.user = auth.user
-            supabase.postgrest.auth(token)
 
         except Exception as e:
             logging.error(e)
@@ -41,7 +58,6 @@ async def required_authentication(request: Request, call_next):
     return await call_next(request)
 
 
-# Set up logging
 logging.basicConfig(level=logging.INFO)
 
 
@@ -61,5 +77,6 @@ async def http_exception_handler(request: Request, exc: HTTPException):
     )
 
 
-app.include_router(user.router, prefix="/api/users")
-app.include_router(sample.router, prefix="/api/samples")
+app.include_router(users.router, prefix="/api/users")
+app.include_router(samples.router, prefix="/api/samples")
+app.include_router(sessions.router, prefix="/api/sessions")

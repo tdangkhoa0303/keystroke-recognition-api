@@ -1,10 +1,12 @@
 from pathlib import Path
 from typing import List
 
+from constants import SecurityThreshold
 import joblib
 import numpy as np
 import pandas as pd
 from imblearn.over_sampling import SMOTE
+from queries.estimator import query_latest_estimator
 from scipy import stats
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 from sklearn.model_selection import GridSearchCV, train_test_split
@@ -12,7 +14,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from xgboost import XGBClassifier
 
-from helpers.final_features import compute_features
+from helpers.features_extract import compute_features
 from vendors.supabase import supabase
 
 
@@ -84,8 +86,8 @@ def create_pipeline():
 data_folder = Path(__file__).resolve().parent.parent / "data"
 
 
-def generate_model_url(user_id: str):
-    return data_folder / f"{user_id}.json"
+def generate_model_url(user_id: str, estimator_id: str):
+    return data_folder / f"{user_id}.{estimator_id}.json"
 
 
 async def train_model_for_user(user):
@@ -200,49 +202,66 @@ async def train_model_for_user(user):
     best_model = grid_search.best_estimator_
     y_pred = best_model.predict(x_test)
     print(f"Test Accuracy: {accuracy_score(y_test, y_pred)}")
-    joblib.dump(best_model, generate_model_url(user.id))
 
     # Metrics
     print("Confusion Matrix:\n", confusion_matrix(y_test, y_pred, labels=[0, 1]))
     print("\nClassification Report:\n", classification_report(y_test, y_pred))
 
-    supabase.table("histories").insert(
-        {
-            "user_id": user.id,
-            "accuracy": accuracy_score(y_test, y_pred),
-            "num_of_samples": len(user_samples),
-        }
-    ).execute()
+    response = (
+        supabase.table("estimators")
+        .insert(
+            {
+                "user_id": user.id,
+                "accuracy": accuracy_score(y_test, y_pred),
+                "num_of_samples": len(user_samples),
+            }
+        )
+        .execute()
+    )
+    estimator = response.data[0]
+
+    joblib.dump(
+        best_model, generate_model_url(user_id=user.id, estimator_id=estimator["id"])
+    )
 
 
 def is_model_existed(user_id: str):
-    return Path(generate_model_url(user_id=user_id)).is_file()
+    return query_latest_estimator(user_id) is not None
 
 
-async def predict_user_samples(user, samples: List[dict]):
+async def predict_user_samples(
+    user,
+    profile,
+    samples: List[dict],
+    session_id: str,
+):
     if user is None:
         raise Exception("User not found")
     # Load the saved model
-    classifier = joblib.load(generate_model_url(user.id))
+    estimator = query_latest_estimator(user.id)
+    classifier = joblib.load(generate_model_url(user.id, estimator_id=estimator["id"]))
 
     # Process the samples
     processed_samples = process_event_data(samples)
 
-    # Make predictions
-    y_pred = classifier.predict(processed_samples)
     predicted_proba = classifier.predict_proba(processed_samples)
     print(f"Predicted for user {user.email}: {predicted_proba}")
 
-    # predicted_samples = [
-    #     {
-    #         "user_id": user.id,
-    #         "events": sample["events"],
-    #         "predicted_score": predicted_proba[index][1],
-    #         "security_level": user.user_metadata["security_level"],
-    #     }
-    #     for index, sample in enumerate(samples)
-    # ]
-    # supabase.table("samples").insert(predicted_samples).execute()
-
-    # Return predictions as a list
-    return y_pred.tolist()
+    is_legitimate = (
+        float(np.mean(predicted_proba[:, 1]))
+        > SecurityThreshold[profile["security_level"]].value
+    )
+    predicted_samples = [
+        {
+            "user_id": user.id,
+            "events": sample["events"],
+            "predicted_score": float(predicted_proba[index][1]),
+            "security_level": profile["security_level"],
+            "session_id": session_id,
+            "is_legitimate": float(predicted_proba[index][1])
+            > SecurityThreshold[profile["security_level"]].value,
+        }
+        for index, sample in enumerate(samples)
+    ]
+    supabase.table("samples").insert(predicted_samples).execute()
+    return is_legitimate

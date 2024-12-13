@@ -1,21 +1,21 @@
 from datetime import datetime
+import json
 from typing import List, Optional, Any
 
 import logging
 from constants import SecurityThreshold
 from dependencies import auth
-from fastapi import APIRouter, HTTPException, status, Depends
+from fastapi import APIRouter, HTTPException, status, Depends, Request
+from helpers.session import extract_session_id
 from pydantic import BaseModel
-from helpers.final_trainer import (
+from helpers.trainer import (
     is_model_existed,
     predict_user_samples,
     train_model_for_user,
 )
-from models.response import Response
-from models.sample import Event, Sample
-from models.session import Session
-from models.user import User
+
 from fastapi.responses import JSONResponse
+from queries.estimator import query_latest_estimator
 from vendors.supabase import auth_admin_client, supabase
 
 router = APIRouter()
@@ -95,31 +95,62 @@ class SignInPayload(BaseModel):
 
 
 @router.post("/sign-in")
-async def login(payload: SignInPayload):
+async def login(payload: SignInPayload, request: Request):
     if payload.samples is None:
         raise HTTPException(detail="Bad request", status_code=400)
 
     user = {}
+    session = {}
     try:
         response = supabase.auth.sign_in_with_password(
             {"email": payload.email, "password": payload.password}
         )
         user = response.user
+        session = response.session
     except Exception as error:
         logging.error(error)
         raise HTTPException(
             status_code=400,
             detail="Invalid credentials",
         )
+    user_agent = request.headers.get("user-agent")
+    session_metadata_response = (
+        supabase.table("session_metadata")
+        .insert(
+            {
+                "ua": user_agent,
+                "ip": request.client.host,
+                "expires_at": session.expires_at,
+                "access_token": session.access_token,
+                "refresh_token": session.refresh_token,
+                "is_revoked": False,
+                "user_id": user.id,
+            }
+        )
+        .execute()
+    )
+
+    session_metadata = session_metadata_response.data[0]
+    user_profile = (
+        supabase.table("profiles").select("*").eq("id", user.id).single().execute()
+    ).data
+
     is_legitimate = False
     if is_model_existed(user.id):
-        predict_result = await predict_user_samples(user, samples=payload.samples)
-        print(predict_result)
-        is_legitimate = len(list(filter(lambda x: x == 0, predict_result))) == 0
+        is_legitimate = await predict_user_samples(
+            user,
+            profile=user_profile,
+            samples=payload.samples,
+            session_id=session_metadata["id"],
+        )
     else:
         is_legitimate = True
 
     if (is_legitimate) is False:
+        supabase.table("session_metadata").update({"is_revoked": True}).eq(
+            "id", session_metadata["id"]
+        ).execute()
+
         raise HTTPException(
             status_code=400,
             detail="Invalid credentials",
@@ -127,25 +158,33 @@ async def login(payload: SignInPayload):
 
     return JSONResponse(
         status_code=status.HTTP_200_OK,
-        content={"accessToken": response.session.access_token},
+        content={
+            "accessToken": response.session.access_token,
+            "refreshToken": response.session.refresh_token,
+        },
     )
 
 
 @router.get("/me")
 async def get_me(user=Depends(auth.extract)):
-    user_metadata = user.user_metadata
+    user_profile_response = (
+        supabase.table("profiles").select("*").eq("id", user.id).single().execute()
+    )
+    user_profile = user_profile_response.data
 
     return JSONResponse(
         status_code=status.HTTP_200_OK,
-        content=User(
-            id=user.id,
-            email=user.email,
-            firstName=user_metadata["first_name"],
-            lastName=user_metadata["last_name"],
-            # securityLevel=user_metadata["security_level"],
-            # enableBehaviouralBiometrics=user_metadata["enable_behavioural_biometrics"],
-            createdAt=user.created_at,
-        ).model_dump(mode="json"),
+        content={
+            "id": user.id,
+            "email": user_profile["email"],
+            "firstName": user_profile["first_name"],
+            "lastName": user_profile["last_name"],
+            "securityLevel": user_profile["security_level"],
+            "enableBehaviouralBiometrics": user_profile[
+                "enable_behavioural_biometrics"
+            ],
+            "createdAt": str(user.created_at),
+        },
     )
 
 
@@ -154,8 +193,14 @@ class StoreSamplesPayload(BaseModel):
 
 
 @router.post("/samples")
-async def post_samples(payload: StoreSamplesPayload, user=Depends(auth.extract)):
-    if payload.samples:
+async def post_samples(
+    payload: StoreSamplesPayload,
+    request: Request,
+    user=Depends(auth.extract),
+    profile=Depends(auth.extract_profile),
+):
+    session_metadata = request.state.session_metadata
+    if payload.samples and session_metadata is not None:
         supabase.table("samples").insert(
             list(
                 map(
@@ -163,7 +208,8 @@ async def post_samples(payload: StoreSamplesPayload, user=Depends(auth.extract))
                         "user_id": user.id,
                         "events": x["events"],
                         "predicted_score": 1,
-                        "secury_level": user.user_metadata["security_level"],
+                        "session_id": session_metadata["id"],
+                        "security_level": profile["security_level"],
                     },
                     payload.samples,
                 )
@@ -185,35 +231,32 @@ class UpdateSecurityConfigs(BaseModel):
 async def update_security_configs(
     payload: UpdateSecurityConfigs, user=Depends(auth.extract)
 ):
-    auth_admin_client.update_user_by_id(
-        user.id,
-        {
-            "user_metadata": user.user_metadata
-            | {
+    (
+        supabase.table("profiles")
+        .update(
+            {
                 "security_level": payload.security_level,
                 "enable_behavioural_biometrics": payload.enable_behavioural_biometrics,
             }
-        },
-    )
-
-    return JSONResponse(
-        content={"message": "Samples are stored successfully"},
-        status_code=status.HTTP_201_CREATED,
-    )
-
-
-@router.get("/histories/latest")
-async def get_latest_history(user=Depends(auth.extract)):
-    response = (
-        supabase.table("histories")
-        .select("*")
-        .eq("user_id", user.id)
-        .order("created_at", desc=True)
-        .limit(1)
+        )
+        .eq("id", user.id)
         .execute()
     )
 
     return JSONResponse(
-        content=response.data[0],
+        content={"message": "Update security configs successfully"},
+        status_code=status.HTTP_200_OK,
+    )
+
+
+@router.get("/estimators/latest")
+async def get_latest_estimator(user=Depends(auth.extract)):
+    estimator = query_latest_estimator(user.id)
+
+    if estimator is None:
+        raise HTTPException(status_code=status.HTTP_204_NO_CONTENT, content={})
+
+    return JSONResponse(
+        content=estimator,
         status_code=status.HTTP_200_OK,
     )
