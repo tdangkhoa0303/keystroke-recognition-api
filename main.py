@@ -6,7 +6,7 @@ from fastapi.responses import JSONResponse
 
 from fastapi import HTTPException, Request
 from vendors.supabase import supabase
-from routers import samples, sessions, users
+from routers import samples, sessions, statistics, users
 
 app = FastAPI()
 
@@ -37,6 +37,7 @@ async def required_authentication(request: Request, call_next):
                 supabase.table("session_metadata")
                 .select("*")
                 .eq("access_token", token)
+                .single()
                 .execute()
             ).data
 
@@ -80,3 +81,4 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 app.include_router(users.router, prefix="/api/users")
 app.include_router(samples.router, prefix="/api/samples")
 app.include_router(sessions.router, prefix="/api/sessions")
+app.include_router(statistics.router, prefix="/api/statistics")

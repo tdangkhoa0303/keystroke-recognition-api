@@ -57,37 +57,47 @@ def query_params(
     user_id: Optional[str] = Query(None),
     session_id: Optional[str] = Query(None),
     page: Optional[int] = Query(None),
-    page_size: Optional[int] = Query(None)   
+    page_size: Optional[int] = Query(None),
+    start_date: Optional[datetime] = Query(None),
+    end_date: Optional[datetime] = Query(None),
 ):
     return {
         "user_id": user_id,
         "session_id": session_id,
         "page": page,
         "page_size": page_size,
+        "start_date": start_date,
+        "end_date": end_date,
     }
 
 
 @router.get("/")
 async def get_samples(params: dict = Depends(query_params)):
     query = supabase.from_("samples").select(
-        "id, created_at, predicted_score, security_level, created_at, events",
+        "id, created_at, predicted_score, security_level, created_at, events, is_legitimate",
         "session_metadata(ua, ip, created_at)",
         "user:profiles(id, email, first_name, last_name)",
         count="exact",
-    ).order("created_at", desc=True)
+    )
 
     if params["user_id"]:
         query = query.eq("user_id", params["user_id"])
 
     if params["session_id"]:
         query = query.eq("session_id", params["session_id"])
-    
+
+    if params["start_date"]:
+        query = query.gte("created_at", params["start_date"].isoformat())
+
+    if params["end_date"]:
+        query = query.lte("created_at", params["end_date"].isoformat())
+
     if params["page"] and params["page_size"]:
         page = params["page"] or 1
         page_size = params["page_size"] or 10
         query = query.range((page - 1) * page_size, page * page_size - 1)
 
-    response = query.execute()
+    response = query.order("created_at", desc=True).execute()
 
     return JSONResponse(
         content={
@@ -95,7 +105,11 @@ async def get_samples(params: dict = Depends(query_params)):
             "total_items": response.count,
             "page": params["page"],
             "page_size": params["page_size"],
-            "total_pages": math.ceil(response.count / params["page_size"]) if (response.count and params["page_size"]) else None,
+            "total_pages": (
+                math.ceil(response.count / params["page_size"])
+                if (response.count and params["page_size"])
+                else None
+            ),
         },
         status_code=status.HTTP_200_OK,
     )

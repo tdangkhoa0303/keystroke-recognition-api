@@ -25,11 +25,6 @@ class StoreSamplesPayload(BaseModel):
     samples: List[BaseSample]
 
 
-@router.get("/metrics")
-async def get_monitor_metrics(user=Depends(auth.extract)):
-    return False
-
-
 def query_params(
     user_id: Optional[str] = Query(None),
     start_date: Optional[datetime] = Query(None),
@@ -64,7 +59,7 @@ def get_sessions(params: dict = Depends(query_params)):
             .select(
                 "id, ua, ip, created_at, is_revoked",
                 "user:profiles(*)",
-                "samples(total_legitimate:is_legitimate.count(), total_samples:id.count())",
+                "samples(total_legitimate:is_legitimate::int.sum(), total_samples:id.count())",
                 count="exact",
             )
             .range((page - 1) * page_size, page * page_size - 1)
@@ -96,3 +91,15 @@ def get_sessions(params: dict = Depends(query_params)):
     except Exception as e:
         print(e)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{session_id}/revoke")
+async def revoke_session(session_id):
+    supabase.table("session_metadata").update({"is_revoked": True}).eq(
+        "id", session_id
+    ).execute()
+
+    return JSONResponse(
+        content={},
+        status_code=status.HTTP_200_OK,
+    )
