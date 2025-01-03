@@ -57,7 +57,7 @@ def get_sessions(params: dict = Depends(query_params)):
         query = (
             supabase.from_("session_metadata")
             .select(
-                "id, ua, ip, created_at, is_revoked",
+                "id, ua, ip, created_at, is_revoked, status",
                 "user:profiles(*)",
                 "samples(total_legitimate:is_legitimate::int.sum(), total_samples:id.count())",
                 count="exact",
