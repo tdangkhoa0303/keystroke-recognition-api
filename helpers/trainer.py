@@ -1,7 +1,8 @@
 from pathlib import Path
 from typing import List
 
-from constants import SecurityThreshold
+from constants import SecurityThreshold, SessionStatus
+from datetime import datetime
 import joblib
 import numpy as np
 import pandas as pd
@@ -95,7 +96,8 @@ async def train_model_for_user(user):
         supabase.table("samples")
         .select("*")
         .eq("user_id", user.id)
-        # .eq("is_legitimate", True)
+        .eq("is_legitimate", True)
+        .gte("predicted_score", 0.8)
         .execute()
     )
 
@@ -264,4 +266,24 @@ async def predict_user_samples(
         for index, sample in enumerate(samples)
     ]
     supabase.table("samples").insert(predicted_samples).execute()
+    session = (
+        supabase.table("session_metadata")
+        .select("*")
+        .eq("id", session_id)
+        .single()
+        .execute()
+    ).data
+    if session and is_legitimate:
+        (
+            supabase.table("session_metadata")
+            .update(
+                {
+                    "last_mfa_verified": str(datetime.now()),
+                    "status": SessionStatus.ACTIVE.value,
+                }
+            )
+            .eq("id", session_id)
+            .execute()
+        )
+
     return is_legitimate

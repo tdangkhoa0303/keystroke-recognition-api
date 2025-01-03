@@ -1,9 +1,9 @@
 from datetime import datetime
-import json
-from typing import List, Optional, Any
+import math
+from typing import List, Any
 
 import logging
-from constants import SecurityThreshold
+from constants import SecurityThreshold, SessionStatus
 from dependencies import auth
 from fastapi import APIRouter, HTTPException, status, Depends, Request
 from helpers.session import extract_session_id
@@ -33,7 +33,6 @@ class SignUpPayload(BaseModel):
     password: str
     samples: List[BaseSample]
     enableBehavioralBiometrics: bool
-    tp: Any
 
 
 @router.post("/sign-up", status_code=status.HTTP_201_CREATED)
@@ -71,6 +70,7 @@ async def sign_up(payload: SignUpPayload):
                             "user_id": user.id,
                             "events": x.events,
                             "predicted_score": 1,
+                            "is_legitimate": True,
                             "security_level": user.user_metadata["security_level"],
                         },
                         payload.samples,
@@ -90,15 +90,10 @@ async def sign_up(payload: SignUpPayload):
 class SignInPayload(BaseModel):
     email: str
     password: str
-    samples: Optional[List[Any]]
-    tp: Any
 
 
 @router.post("/sign-in")
 async def login(payload: SignInPayload, request: Request):
-    if payload.samples is None:
-        raise HTTPException(detail="Bad request", status_code=400)
-
     user = {}
     session = {}
     try:
@@ -114,7 +109,15 @@ async def login(payload: SignInPayload, request: Request):
             detail="Invalid credentials",
         )
     user_agent = request.headers.get("user-agent")
-    session_metadata_response = (
+
+    user_profile = (
+        supabase.table("profiles").select("*").eq("id", user.id).single().execute()
+    ).data
+    requied_keystroke_verification = user_profile[
+        "enable_behavioural_biometrics"
+    ] and is_model_existed(user.id)
+
+    session_metadata = (
         supabase.table("session_metadata")
         .insert(
             {
@@ -125,48 +128,32 @@ async def login(payload: SignInPayload, request: Request):
                 "refresh_token": session.refresh_token,
                 "is_revoked": False,
                 "user_id": user.id,
+                "status": (
+                    SessionStatus.PENDING.value
+                    if requied_keystroke_verification
+                    else SessionStatus.ACTIVE.value
+                ),
             }
         )
         .execute()
-    )
-
-    session_metadata = session_metadata_response.data[0]
-    user_profile = (
-        supabase.table("profiles").select("*").eq("id", user.id).single().execute()
-    ).data
-
-    is_legitimate = False
-    if is_model_existed(user.id):
-        is_legitimate = await predict_user_samples(
-            user,
-            profile=user_profile,
-            samples=payload.samples,
-            session_id=session_metadata["id"],
-        )
-    else:
-        is_legitimate = True
-
-    if (is_legitimate) is False:
-        supabase.table("session_metadata").update({"is_revoked": True}).eq(
-            "id", session_metadata["id"]
-        ).execute()
-
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid credentials",
-        )
+    ).data[0]
 
     return JSONResponse(
         status_code=status.HTTP_200_OK,
         content={
+            "id": session_metadata["id"],
             "accessToken": response.session.access_token,
             "refreshToken": response.session.refresh_token,
+            "requiredKeystrokeVerification": requied_keystroke_verification,
         },
     )
 
 
 @router.get("/me")
-async def get_me(user=Depends(auth.extract)):
+async def get_me(
+    user=Depends(auth.extract),
+    _=Depends(auth.required_keystroke_verification(limit_in_minutes=math.inf)),
+):
     user_profile_response = (
         supabase.table("profiles").select("*").eq("id", user.id).single().execute()
     )
@@ -259,4 +246,35 @@ async def get_latest_estimator(user=Depends(auth.extract)):
     return JSONResponse(
         content=estimator,
         status_code=status.HTTP_200_OK,
+    )
+
+
+class VeriySamplesPayload(BaseModel):
+    samples: List[Any]
+
+
+@router.post("/verify-session")
+async def verify(
+    payload: VeriySamplesPayload,
+    request: Request,
+    user=Depends(auth.extract),
+    profile=Depends(auth.extract_profile),
+):
+    session_metadata = request.state.session_metadata
+    is_legitimate = await predict_user_samples(
+        user,
+        profile=profile,
+        samples=payload.samples,
+        session_id=session_metadata["id"],
+    )
+
+    if is_legitimate is False:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid credentials",
+        )
+
+    return JSONResponse(
+        status_code=status.HTTP_204_NO_CONTENT,
+        content={},
     )
