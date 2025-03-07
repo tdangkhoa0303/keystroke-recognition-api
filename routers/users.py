@@ -171,6 +171,7 @@ async def get_me(
                 "enable_behavioural_biometrics"
             ],
             "createdAt": str(user.created_at),
+            "role": user_profile["role"],
         },
     )
 
@@ -197,6 +198,7 @@ async def post_samples(
                         "predicted_score": 1,
                         "session_id": session_metadata["id"],
                         "security_level": profile["security_level"],
+                        "is_legitimate": True,
                     },
                     payload.samples,
                 )

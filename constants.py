@@ -12,3 +12,8 @@ class SessionStatus(enum.Enum):
     ACTIVE = "active"
     EXPIRED = "expired"
     REVOKED = "revoked"
+
+
+class UserRole(enum.Enum):
+    ADMIN = "admin"
+    USER = "user"
